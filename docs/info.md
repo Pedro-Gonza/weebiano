@@ -13,8 +13,8 @@ You can also include images in this folder and reference them in the markdown. E
 
 ## How to test
 
-Connect all external hardware and power up, start playing notes by pushing the buttons.
+Connect all external hardware and power up, start playing notes by pushing the buttons, watch animations change between idle and 'singing'animation.
 
 ## External hardware
 
-8 pushbuttons to inputs, vga output and a passive buzzer to uio0.
+8 pushbuttons to inputs, vga output and a passive buzzer to uio0 to playback sound.

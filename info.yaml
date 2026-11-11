@@ -18,8 +18,8 @@ project:
   source_files:
     - "project.v"
     - "hvsync_generator.v"
-    - "palette.v"
-    - "bitmap_rom.v"
+    - "label_rom.v"
+    - "frame_rom.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 pinout:
