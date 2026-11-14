@@ -148,8 +148,23 @@ module tt_um_peterm_weebiano (
     default: accent = 6'b111111;
   endcase
 
-  wire       edge_bar = (cx < 6'd1) || (cx >= 6'd39);
-  wire [5:0] bg = (anim_on && edge_bar) ? accent : 6'b000001;   // solid dark blue
+  reg [5:0] bgt;                               // frame counter: ring motion + vibrato LFO
+  always @(posedge clk) bgt <= !rst_n ? 6'd0 : (vs_edge ? bgt + 6'd1 : bgt);
+
+  // concentric octagon rings centred behind the head (cell boundary x=20, y=18)
+  wire [5:0] dx6 = (cx >= 6'd20) ? (cx - 6'd20) : (6'd19 - cx);
+  wire [5:0] dy6 = (cy >= 6'd18) ? (cy - 6'd18) : (6'd17 - cy);
+  wire       xbig = dx6 > dy6;
+  wire [4:0] dmx  = xbig ? dx6[4:0] : dy6[4:0];
+  wire [4:0] dmn  = xbig ? dy6[4:0] : dx6[4:0];
+  wire [4:0] rd   = dmx + {1'b0, dmn[4:1]};        // ~ circular distance
+  // singing: rings expand outward; idle: rings contract inward
+  wire [2:0] ph   = anim_on ? (rd[2:0] - bgt[5:3]) : (rd[2:0] + bgt[5:3]);
+  wire       ring = ph[2];
+
+  // the two bands always differ: black vs. tinted (tint is never 0)
+  wire [5:0] bg = anim_on ? (ring ? (accent & 6'b010101) : 6'b000000)
+                          : (ring ? 6'b000010 : 6'b000001);
 
   reg [5:0] pal;
   always @* case (idx)
@@ -191,37 +206,35 @@ module tt_um_peterm_weebiano (
                          (oct_dn && !oct_up) ? (half << 1) : half;
 
   // vibrato: triangle of about 6 Hz, depth about +-190 cycles
-  reg [21:0] vcnt;
-  always @(posedge clk) vcnt <= rst_n ? vcnt + 22'd1 : 22'd0;
-  wire [2:0]  vph  = vcnt[21:19];
+  wire [2:0]  vph  = bgt[2:0];             // 60 Hz / 8 = 7.5 Hz
   wire [1:0]  tria = vph[2] ? ~vph[1:0] : vph[1:0];
   wire [15:0] half_v = vib_en ? (half_oct + {7'b0, tria, 7'b0} - 16'd192) : half_oct;
 
   // 8 slots per period; the waveform is a pattern over the slots
   reg [13:0] tcnt;
   reg [2:0]  slot;
-  reg [15:0] lfsr;
+  reg [3:0] age;
   wire [13:0] tick_lim = half_v[15:2];
   always @(posedge clk) begin
     if (!rst_n) begin
-      tcnt <= 0; slot <= 0; lfsr <= 16'hACE1;
+      tcnt <= 0; slot <= 0;
     end else if (!sound_on) begin
       tcnt <= 0; slot <= 0;
     end else if (tcnt >= tick_lim) begin
       tcnt <= 0;
       slot <= slot + 3'd1;
-      lfsr <= {lfsr[0] ^ lfsr[2] ^ lfsr[3] ^ lfsr[5], lfsr[15:1]};
     end else begin
       tcnt <= tcnt + 14'd1;
     end
   end
 
+  always @(posedge clk) if (!sound_on) age <= 4'd0; else if (vs_edge && age != 4'd15) age <= age + 4'd1;
   reg wave;
   always @* case (timbre)
     2'd0: wave = slot[2];              // 50%
     2'd1: wave = (slot[2:1] == 2'd0);  // 25%
     2'd2: wave = (slot == 3'd0);       // 12.5%
-    default: wave = lfsr[0];           // noise, pitched by the note
+    default: wave = age[3] ? (slot == 3'd0) : age[2] ? (slot[2:1] == 2'd0) : slot[2];  // pluck
   endcase
 
   assign uio_out = {sound_on & wave, 7'b0};
