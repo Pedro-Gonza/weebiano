@@ -11,12 +11,12 @@ module tt_um_peterm_weebiano (
     input  wire       rst_n
 );
   // ---------------- build options ----------------
+  // The playground can't drive uio_in, so TEST_UIO forces values.
+  // Set TEST_UIO = 0 for real hardware / final submission.
+  localparam       TEST_UIO  = 1'b0;
+  localparam [7:0] UIO_FORCE = 8'b0000_0000;   // bit n = uio[n] held high
 
-  // 1 = every other singing loop is drawn mirrored (sway effect for
-  // asymmetric frames). Costs a little area; leave 0 unless you like it.
-  localparam       FLIP_SING = 1'b0;
-
-  wire [7:0] uio = uio_in;
+  wire [7:0] uio = TEST_UIO ? UIO_FORCE : uio_in;
 
   wire       oct_up   = uio[0];
   wire       oct_dn   = uio[1];
@@ -87,54 +87,53 @@ module tt_um_peterm_weebiano (
   wire       sharp    = sharp_in && key_active && note != 3'd2 && note != 3'd6;
 
   // ---------------- animation (2 idle + 2 singing frames) ----------------
-  reg       anim_q, flip, phase;
+  // frame 0 = eyes open, 1 = eyes closed (idle blink), 2 = eyes closed, 3 = mouth open
+  reg       anim_q, phase;
   reg [4:0] tick;
   always @(posedge clk) begin
     if (!rst_n) begin
-      anim_q <= 0; tick <= 0; phase <= 0; flip <= 0;
+      anim_q <= 0; tick <= 0; phase <= 0;
     end else begin
       anim_q <= anim_on;
       if (anim_on != anim_q) begin             // start/stop: restart loop
-        tick <= 0; phase <= 0; flip <= 0;
+        tick <= 0; phase <= 0;
       end else if (vs_edge) begin
         if (tick == (anim_on ? 5'd7 : 5'd31)) begin   // sing ~7.5 Hz, idle ~2 Hz
           tick  <= 0;
           phase <= ~phase;
-          if (FLIP_SING && anim_on && phase) flip <= ~flip;
         end else tick <= tick + 5'd1;
       end
     end
   end
   wire [2:0] frame = {1'b0, anim_on, phase};   // 0-1 idle, 2-3 singing
 
-  // ---------------- picture (28x24 cells, 16x16 px each) ----------------
+  // ---------------- picture (28 x 22 cells, 16x16 px each) ----------------
   wire [5:0] cx = pix_x[9:4];                  // 0..39
   wire [5:0] cy = pix_y[9:4];                  // 0..29
 
-  wire       in_pic = video_active && cx >= 6'd6 && cx < 6'd34 && cy >= 6'd6;
+  wire       in_pic = video_active && cx >= 6'd6 && cx < 6'd34 && cy >= 6'd8;
   wire [4:0] px = cx[4:0] - 5'd6;              // 0..27
-  wire [4:0] py = cy[4:0] - 5'd6;              // 0..23
-  wire [4:0] fx = (FLIP_SING && flip && anim_on) ? (5'd27 - px) : px;
+  wire [4:0] py = cy[4:0] - 5'd8;              // 0..21
 
   wire [1:0] pic_pix;
-  frame_rom pic_rom (.frame(frame), .x(fx), .y(py), .pixel(pic_pix));
+  frame_rom pic_rom (.frame(frame), .x(px), .y(py), .pixel(pic_pix));
   wire [1:0] idx = in_pic ? pic_pix : 2'd0;
 
-  // note label, top-left (cells x 0..7, y 0..4)
-  wire in_lab = video_active && anim_on && cx < 6'd8 && cy < 6'd5;
+  // note label, top-left (cells x 1..8, y 0..4)
+  wire in_lab = video_active && anim_on && cx >= 6'd1 && cx < 6'd9 && cy < 6'd5;
   wire lab_pix;
-  label_rom lab_rom (.note(note), .x(cx[2:0]), .y(cy[2:0]), .pixel(lab_pix));
+  label_rom lab_rom (.note(note), .x(cx[2:0] - 3'd1), .y(cy[2:0]), .pixel(lab_pix));
 
-  // sharp glyph "#" (3x5) next to the label (cells x 9..11, y 0..4)
-  wire       in_sh = video_active && sharp && cx >= 6'd9 && cx < 6'd12 && cy < 6'd5;
-  wire [1:0] gx = cx[1:0] - 2'd1;
+  // sharp glyph "#" (3x5) next to the label (cells x 10..12, y 0..4)
+  wire       in_sh = video_active && sharp && cx >= 6'd10 && cx < 6'd13 && cy < 6'd5;
+  wire [1:0] gx = cx[1:0] - 2'd2;
   wire [2:0] gy = cy[2:0];
   wire       sh_pix = (gx != 2'd1) || gy[0];
 
-  // octave indicator, top-right (cells x 34.., y 1)
-  wire [5:0] oct_end = (oct_up && !oct_dn) ? 6'd36 :
-                       (oct_dn && !oct_up) ? 6'd34 : 6'd35;
-  wire in_oct = video_active && cy == 6'd1 && cx >= 6'd34 && cx <= oct_end;
+  // octave indicator, top-right: 1 cell = down, 3 cells = up, hidden if normal
+  wire [5:0] oct_end = oct_up ? 6'd36 : 6'd34;
+  wire in_oct = video_active && (oct_up ^ oct_dn) && cy == 6'd1 &&
+                cx >= 6'd34 && cx <= oct_end;
 
   // ---------------- colors {R,G,B}, 2 bits each ----------------
   reg [5:0] accent;
@@ -150,7 +149,7 @@ module tt_um_peterm_weebiano (
   endcase
 
   wire       edge_bar = (cx < 6'd1) || (cx >= 6'd39);
-  wire [5:0] bg = (anim_on && edge_bar) ? accent : {4'b0000, cy[4:3]};
+  wire [5:0] bg = (anim_on && edge_bar) ? accent : 6'b000001;   // solid dark blue
 
   reg [5:0] pal;
   always @* case (idx)
@@ -195,7 +194,7 @@ module tt_um_peterm_weebiano (
   reg [21:0] vcnt;
   always @(posedge clk) vcnt <= rst_n ? vcnt + 22'd1 : 22'd0;
   wire [2:0]  vph  = vcnt[21:19];
-  wire [1:0]  tria  = vph[2] ? ~vph[1:0] : vph[1:0];
+  wire [1:0]  tria = vph[2] ? ~vph[1:0] : vph[1:0];
   wire [15:0] half_v = vib_en ? (half_oct + {7'b0, tria, 7'b0} - 16'd192) : half_oct;
 
   // 8 slots per period; the waveform is a pattern over the slots
