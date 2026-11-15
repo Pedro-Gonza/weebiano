@@ -79,11 +79,13 @@ module frame_rom (
   endcase
   wire [4:0] oy = y - 5'd10;
   wire [3:0] oc = c - 4'd0;
-  wire in_win = (y >= 5'd10) && (y <= 5'd15) && (c >= 4'd0) && (c <= 4'd6);
+  wire in_win = (y >= 5'd10) && (y <= 5'd15) && (c <= 4'd6);
   wire [13:0] orow = omem[{ex, oy[2:0]}];
   wire [1:0] opix = in_win ? orow[{oc[2:0], 1'b0} +: 2] : 2'd0;
 
   wire [1:0] rpix = 2'd0;
+
+  wire _unused = &{frame[2], cc[4], oy[4:3], oc[3:3], 1'b0};
 
   // the three layers never overlap (their ROM cells are zeroed)
   assign pixel = bpix | opix | rpix;

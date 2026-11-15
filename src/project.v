@@ -13,10 +13,26 @@ module tt_um_peterm_weebiano (
   // ---------------- build options ----------------
   // The playground can't drive uio_in, so TEST_UIO forces values.
   // Set TEST_UIO = 0 for real hardware / final submission.
-  localparam       TEST_UIO  = 1'b0;
+  localparam       TEST_UIO  = 1'b1;
   localparam [7:0] UIO_FORCE = 8'b0000_0000;   // bit n = uio[n] held high
 
   wire [7:0] uio = TEST_UIO ? UIO_FORCE : uio_in;
+
+  // ---------------- visual options (0 = off: the logic is removed from the build) ----------------
+  localparam BOUNCE          = 1;  // sprite drops 1 cell on alternate animation frames
+  localparam RING_SPEED_NOTE = 1;  // ring speed follows each note's pitch (0 = fixed speed)
+  localparam IDLE_CYCLE      = 1;  // idle ring colours drift through 4 palettes
+  localparam RING_EXACT      = 1;  // 1 = true circles (integer sqrt, costs more area), 0 = close approximation
+  localparam RING_BAND       = 1;  // ring thickness: 2 = 4 cells, 1 = 2 cells, 0 = 1 cell
+  localparam RING_TS         = 5;  // ring speed: 7 slower ... 5 faster (C = 7.5 cells/s at 6)
+  localparam LABEL_BOX       = 1;  // 1 = plain dark box behind the note label so it is always legible
+
+  // ---------------- demo tune ----------------
+  // 4 bits per step, step 0 in the lowest bits: bit 3 = rest, bits 2:0 = note
+  // (0 Do, 1 Re, 2 Mi, 3 Fa, 4 Sol, 5 La, 6 Si, 7 high Do).  Make it with make_tune.py.
+  localparam        DEMO_STEPS  = 16;  // 1..32 steps, then it loops
+  localparam        DEMO_FRAMES = 12;  // video frames per step (60 / this = steps per second)
+  localparam [127:0] DEMO_TUNE  = 128'h00000000000000008112210012344322;
 
   wire       oct_up   = uio[0];
   wire       oct_dn   = uio[1];
@@ -57,33 +73,25 @@ module tt_um_peterm_weebiano (
 
   // ---------------- demo jingle ----------------
   wire demo_active = demo_en && !key_active;
-  reg [3:0] dtick, dstep;                    // 15 vsyncs per step = 4 notes/s
+  reg [4:0] dtick, dstep;
   always @(posedge clk) begin
     if (!rst_n || !demo_active) begin
       dtick <= 0; dstep <= 0;
     end else if (vs_edge) begin
-      if (dtick == 4'd14) begin dtick <= 0; dstep <= dstep + 4'd1; end
-      else                dtick <= dtick + 4'd1;
+      if (dtick == DEMO_FRAMES - 1) begin
+        dtick <= 0;
+        dstep <= (dstep == DEMO_STEPS - 1) ? 5'd0 : dstep + 5'd1;
+      end else dtick <= dtick + 5'd1;
     end
   end
 
-  reg [2:0] demo_note;
-  reg       demo_rest;
-  always @* begin
-    demo_rest = 1'b0;
-    case (dstep)             // E E F G | G F E D | C C D E | E D D -
-      4'd0, 4'd1, 4'd6, 4'd11, 4'd12: demo_note = 3'd2;
-      4'd2, 4'd5:                      demo_note = 3'd3;
-      4'd3, 4'd4:                      demo_note = 3'd4;
-      4'd7, 4'd10, 4'd13, 4'd14:       demo_note = 3'd1;
-      4'd8, 4'd9:                      demo_note = 3'd0;
-      default: begin demo_note = 3'd0; demo_rest = 1'b1; end
-    endcase
-  end
+  wire [3:0] dent      = DEMO_TUNE[{dstep, 2'b00} +: 4];
+  wire [2:0] demo_note = dent[2:0];
+  wire       demo_rest = dent[3];
 
   wire [2:0] note     = key_active ? key_note : demo_note;
   wire       anim_on  = key_active || (demo_active && !demo_rest);
-  wire       sound_on = key_active || (demo_active && !demo_rest && dtick != 4'd0);
+  wire       sound_on = key_active || (demo_active && !demo_rest && dtick != 5'd0);
   wire       sharp    = sharp_in && key_active && note != 3'd2 && note != 3'd6;
 
   // ---------------- animation (2 idle + 2 singing frames) ----------------
@@ -107,13 +115,18 @@ module tt_um_peterm_weebiano (
   end
   wire [2:0] frame = {1'b0, anim_on, phase};   // 0-1 idle, 2-3 singing
 
+  // time since the key went down (frames, saturates): pluck timbre
+  reg [3:0] age;
+  always @(posedge clk) if (!rst_n || !sound_on) age <= 4'd0; else if (vs_edge && age != 4'd15) age <= age + 4'd1;
+
   // ---------------- picture (28 x 22 cells, 16x16 px each) ----------------
   wire [5:0] cx = pix_x[9:4];                  // 0..39
   wire [5:0] cy = pix_y[9:4];                  // 0..29
 
-  wire       in_pic = video_active && cx >= 6'd6 && cx < 6'd34 && cy >= 6'd8;
+  wire       bob    = (BOUNCE != 0) ? phase : 1'b0;      // sprite drops 1 cell
+  wire       in_pic = video_active && cx >= 6'd6 && cx < 6'd34 && cy >= (6'd8 + {5'b0, bob});
   wire [4:0] px = cx[4:0] - 5'd6;              // 0..27
-  wire [4:0] py = cy[4:0] - 5'd8;              // 0..21
+  wire [4:0] py = cy[4:0] - 5'd8 - {4'b0, bob};  // 0..21
 
   wire [1:0] pic_pix;
   frame_rom pic_rom (.frame(frame), .x(px), .y(py), .pixel(pic_pix));
@@ -124,47 +137,127 @@ module tt_um_peterm_weebiano (
   wire lab_pix;
   label_rom lab_rom (.note(note), .x(cx[2:0] - 3'd1), .y(cy[2:0]), .pixel(lab_pix));
 
-  // sharp glyph "#" (3x5) next to the label (cells x 10..12, y 0..4)
-  wire       in_sh = video_active && sharp && cx >= 6'd10 && cx < 6'd13 && cy < 6'd5;
-  wire [1:0] gx = cx[1:0] - 2'd2;
-  wire [2:0] gy = cy[2:0];
-  wire       sh_pix = (gx != 2'd1) || gy[0];
+  // sharp glyph "#" (5x5, cells x 10..14, y 0..4): odd columns and odd rows
+  wire in_sh  = video_active && sharp && cx >= 6'd10 && cx < 6'd15 && cy < 6'd5;
+  wire sh_pix = cx[0] | cy[0];
 
-  // octave indicator, top-right: 1 cell = down, 3 cells = up, hidden if normal
-  wire [5:0] oct_end = oct_up ? 6'd36 : 6'd34;
-  wire in_oct = video_active && (oct_up ^ oct_dn) && cy == 6'd1 &&
-                cx >= 6'd34 && cx <= oct_end;
+  // octave indicator, top-right (cells x 36..38, y 1..3): "-" = down, "+" = up, hidden if normal
+  wire in_oct  = video_active && (oct_up ^ oct_dn) && cx >= 6'd36 && cx < 6'd39 &&
+                 cy >= 6'd1 && cy < 6'd4;
+  wire oct_pix = (cy == 6'd2) || (oct_up && cx == 6'd37);
 
   // ---------------- colors {R,G,B}, 2 bits each ----------------
-  reg [5:0] accent;
+  // ring colours per note: {dark band, light band}, same idea as the idle palettes.
+  // All differ from each other and from the sprite (hair 001010, skin 111110,
+  // outline 010101) and avoid white/yellow so the yellow label stays readable.
+  reg [5:0] play_a, play_b;
   always @* case (note)
-    3'd0: accent = 6'b110000;
-    3'd1: accent = 6'b111000;
-    3'd2: accent = 6'b111100;
-    3'd3: accent = 6'b001100;
-    3'd4: accent = 6'b001111;
-    3'd5: accent = 6'b000011;
-    3'd6: accent = 6'b110011;
-    default: accent = 6'b111111;
+    3'd0: begin play_a = 6'b010000; play_b = 6'b100000; end   // Do   red
+    3'd1: begin play_a = 6'b100100; play_b = 6'b111000; end   // Re   orange
+    3'd2: begin play_a = 6'b010100; play_b = 6'b101000; end   // Mi   olive
+    3'd3: begin play_a = 6'b000100; play_b = 6'b001000; end   // Fa   green
+    3'd4: begin play_a = 6'b000110; play_b = 6'b001011; end   // Sol  azure
+    3'd5: begin play_a = 6'b000010; play_b = 6'b000011; end   // La   blue
+    3'd6: begin play_a = 6'b100001; play_b = 6'b110010; end   // Si   magenta
+    default: begin play_a = 6'b010110; play_b = 6'b101011; end // Do'  periwinkle
   endcase
 
-  reg [5:0] bgt;                               // frame counter: ring motion + vibrato LFO
+  reg [5:0] bgt;                               // frame counter: vibrato LFO, slow clocks
   always @(posedge clk) bgt <= !rst_n ? 6'd0 : (vs_edge ? bgt + 6'd1 : bgt);
 
-  // concentric octagon rings centred behind the head (cell boundary x=20, y=18)
+  // ring phase accumulator: speed follows the note's pitch (C=8 ... C'=16, ratio 1:2)
+  localparam RPW = RING_TS + 3;
+  reg [4:0] spd;
+  always @* case (note)
+    3'd0: spd = 5'd8;   3'd1: spd = 5'd9;   3'd2: spd = 5'd10;  3'd3: spd = 5'd11;
+    3'd4: spd = 5'd12;  3'd5: spd = 5'd13;  3'd6: spd = 5'd15;  default: spd = 5'd16;
+  endcase
+  reg [RPW-1:0] rph;
+  always @(posedge clk) rph <= !rst_n ? {RPW{1'b0}} :
+                               (vs_edge ? rph + {{(RPW-5){1'b0}}, anim_on ? spd : 5'd8} : rph);
+  wire [2:0] tm = (RING_SPEED_NOTE != 0) ? rph[RING_TS +: 3] : bgt[5:3];
+
+  // slow clock for idle palette drift (changes every ~2 s)
+  reg [2:0] cyc;
+  always @(posedge clk) cyc <= !rst_n ? 3'd0 : ((vs_edge && bgt == 6'd63) ? cyc + 3'd1 : cyc);
+
+  // rings centred behind the head (cell boundary x=20, y=18)
   wire [5:0] dx6 = (cx >= 6'd20) ? (cx - 6'd20) : (6'd19 - cx);
   wire [5:0] dy6 = (cy >= 6'd18) ? (cy - 6'd18) : (6'd17 - cy);
   wire       xbig = dx6 > dy6;
-  wire [4:0] dmx  = xbig ? dx6[4:0] : dy6[4:0];
-  wire [4:0] dmn  = xbig ? dy6[4:0] : dx6[4:0];
-  wire [4:0] rd   = dmx + {1'b0, dmn[4:1]};        // ~ circular distance
-  // singing: rings expand outward; idle: rings contract inward
-  wire [2:0] ph   = anim_on ? (rd[2:0] - bgt[5:3]) : (rd[2:0] + bgt[5:3]);
-  wire       ring = ph[2];
 
-  // the two bands always differ: black vs. tinted (tint is never 0)
-  wire [5:0] bg = anim_on ? (ring ? (accent & 6'b010101) : 6'b000000)
-                          : (ring ? 6'b000010 : 6'b000001);
+  // approximate distance: cell-centre distances in half cells, then
+  // max*15/16 + min*7/16 (within about 4% of a true circle)
+  wire [5:0] mx2 = xbig ? {dx6[4:0], 1'b1} : {dy6[4:0], 1'b1};
+  wire [5:0] mn2 = xbig ? {dy6[4:0], 1'b1} : {dx6[4:0], 1'b1};
+  wire [6:0] mx7 = {1'b0, mx2};
+  wire [6:0] mn7 = {1'b0, mn2};
+  wire [6:0] dap = mx7 - (mx7 >> 4) + (mn7 >> 2) + (mn7 >> 3) + (mn7 >> 4);
+
+  // exact distance: floor(sqrt((dx+.5)^2 + (dy+.5)^2)) = isqrt(dx*(dx+1) + dy*(dy+1))
+  function [8:0] tri9(input [4:0] n);
+    case (n)
+      5'd0: tri9 = 9'd0;
+      5'd1: tri9 = 9'd2;
+      5'd2: tri9 = 9'd6;
+      5'd3: tri9 = 9'd12;
+      5'd4: tri9 = 9'd20;
+      5'd5: tri9 = 9'd30;
+      5'd6: tri9 = 9'd42;
+      5'd7: tri9 = 9'd56;
+      5'd8: tri9 = 9'd72;
+      5'd9: tri9 = 9'd90;
+      5'd10: tri9 = 9'd110;
+      5'd11: tri9 = 9'd132;
+      5'd12: tri9 = 9'd156;
+      5'd13: tri9 = 9'd182;
+      5'd14: tri9 = 9'd210;
+      5'd15: tri9 = 9'd240;
+      5'd16: tri9 = 9'd272;
+      5'd17: tri9 = 9'd306;
+      5'd18: tri9 = 9'd342;
+      5'd19: tri9 = 9'd380;
+      default: tri9 = 9'd0;
+    endcase
+  endfunction
+  function [4:0] isqrt(input [9:0] n);
+    reg [9:0] x, r, b;
+    integer i;
+    begin
+      x = n; r = 10'd0; b = 10'd256;
+      for (i = 0; i < 5; i = i + 1) begin
+        if (x >= r + b) begin x = x - (r + b); r = (r >> 1) + b; end
+        else r = r >> 1;
+        b = b >> 2;
+      end
+      isqrt = r[4:0];
+    end
+  endfunction
+  wire [9:0] qsum = {1'b0, tri9(dx6[4:0])} + {1'b0, tri9(dy6[4:0])};
+  wire [4:0] rex  = isqrt(qsum);
+
+  wire [4:0] rd = (RING_EXACT != 0) ? rex : dap[5:1];
+
+  // singing: rings expand outward; idle: rings contract inward
+  wire [2:0] ph   = anim_on ? (rd[2:0] - tm) : (rd[2:0] + tm);
+  wire       ring = ph[RING_BAND];
+
+  // idle palettes {dark band, light band}
+  wire [1:0] hue = (IDLE_CYCLE != 0) ? cyc[2:1] : 2'd0;
+  reg [5:0] idle_a, idle_b;
+  always @* case (hue)
+    2'd0: begin idle_a = 6'b000001; idle_b = 6'b000010; end   // navy / blue
+    2'd1: begin idle_a = 6'b000100; idle_b = 6'b001000; end   // green
+    2'd2: begin idle_a = 6'b010001; idle_b = 6'b100010; end   // purple
+    default: begin idle_a = 6'b000101; idle_b = 6'b001001; end // teal
+  endcase
+
+  // optional plain box behind the label / sharp sign so they are always legible
+  wire in_box = (LABEL_BOX != 0) && anim_on && cx < (sharp ? 6'd16 : 6'd10) && cy < 6'd6;
+
+  wire [5:0] bg_play = ring ? play_b : play_a;
+  wire [5:0] bg_idle = ring ? idle_b : idle_a;
+  wire [5:0] bg      = in_box ? 6'b000000 : (anim_on ? bg_play : bg_idle);
 
   reg [5:0] pal;
   always @* case (idx)
@@ -175,7 +268,7 @@ module tt_um_peterm_weebiano (
 
   wire [5:0] rgb = !video_active                    ? 6'b000000 :
                    (in_lab && lab_pix) || (in_sh && sh_pix) ? 6'b111100 :
-                   in_oct                           ? 6'b111111 :
+                   in_oct && oct_pix                ? 6'b111111 :
                    (idx != 2'd0)                    ? pal : bg;
 
   // TT VGA pinout: {hsync, B0, G0, R0, vsync, B1, G1, R1}
@@ -213,7 +306,6 @@ module tt_um_peterm_weebiano (
   // 8 slots per period; the waveform is a pattern over the slots
   reg [13:0] tcnt;
   reg [2:0]  slot;
-  reg [3:0] age;
   wire [13:0] tick_lim = half_v[15:2];
   always @(posedge clk) begin
     if (!rst_n) begin
@@ -228,7 +320,6 @@ module tt_um_peterm_weebiano (
     end
   end
 
-  always @(posedge clk) if (!sound_on) age <= 4'd0; else if (vs_edge && age != 4'd15) age <= age + 4'd1;
   reg wave;
   always @* case (timbre)
     2'd0: wave = slot[2];              // 50%
@@ -240,5 +331,5 @@ module tt_um_peterm_weebiano (
   assign uio_out = {sound_on & wave, 7'b0};
   assign uio_oe  = 8'h80;
 
-  wire _unused = &{ena, uio_in, 1'b0};
+  wire _unused = &{ena, uio_in, uio[7], pix_x[3:0], pix_y[3:0], rd[4:3], dap[6], dap[0], ph, half_v[1:0], 1'b0};
 endmodule
