@@ -13,7 +13,7 @@ module tt_um_peterm_weebiano (
   // ---------------- build options ----------------
   // The playground can't drive uio_in, so TEST_UIO forces values.
   // Set TEST_UIO = 0 for real hardware / final submission.
-  localparam       TEST_UIO  = 1'b1;
+  localparam       TEST_UIO  = 1'b0;
   localparam [7:0] UIO_FORCE = 8'b0000_0000;   // bit n = uio[n] held high
 
   wire [7:0] uio = TEST_UIO ? UIO_FORCE : uio_in;
@@ -24,15 +24,23 @@ module tt_um_peterm_weebiano (
   localparam IDLE_CYCLE      = 1;  // idle ring colours drift through 4 palettes
   localparam RING_EXACT      = 1;  // 1 = true circles (integer sqrt, costs more area), 0 = close approximation
   localparam RING_BAND       = 1;  // ring thickness: 2 = 4 cells, 1 = 2 cells, 0 = 1 cell
-  localparam RING_TS         = 5;  // ring speed: 7 slower ... 5 faster (C = 7.5 cells/s at 6)
+  localparam RING_TS         = 3;  // ring speed: 7 slower ... 5 faster (C = 7.5 cells/s at 6)
   localparam LABEL_BOX       = 1;  // 1 = plain dark box behind the note label so it is always legible
 
   // ---------------- demo tune ----------------
-  // 4 bits per step, step 0 in the lowest bits: bit 3 = rest, bits 2:0 = note
-  // (0 Do, 1 Re, 2 Mi, 3 Fa, 4 Sol, 5 La, 6 Si, 7 high Do).  Make it with make_tune.py.
-  localparam        DEMO_STEPS  = 16;  // 1..32 steps, then it loops
-  localparam        DEMO_FRAMES = 12;  // video frames per step (60 / this = steps per second)
-  localparam [127:0] DEMO_TUNE  = 128'h00000000000000008112210012344322;
+  // One entry per note, 8 bits, entry 0 in the lowest bits:
+  //   bits 2:0 note (0 Do, 1 Re, 2 Mi, 3 Fa, 4 Sol, 5 La, 6 Si, 7 high Do), bit 3 sharp,
+  //   bit 4 rest, bits 7:5 = length - 1 (in time units).
+  localparam        DEMO_EVENTS = 55;   // 128 time units in the loop
+  localparam        DEMO_FRAMES_HW = 6;  // frames per unit on real hardware (60 fps): 150 BPM, 4 units per beat
+  // loop length: 12.80 s
+  localparam [511:0] DEMO_TUNE  = 512'h000000000000000000302010042d100f100310001004233064233064706023242324233064233064706023242324233064233064706023242324233064233064;
+  
+  // The playground runs at roughly 20-27 video frames per second instead of 60, and the
+  // demo counts video frames, so it plays 2-3x too slowly there.  DEMO_FRAMES_SIM is used
+  // while TEST_UIO = 1 so the tempo sounds about right in the playground.
+  localparam        DEMO_FRAMES_SIM = 2;
+  localparam        DEMO_FRAMES = TEST_UIO ? DEMO_FRAMES_SIM : DEMO_FRAMES_HW;
 
   wire       oct_up   = uio[0];
   wire       oct_dn   = uio[1];
@@ -73,26 +81,34 @@ module tt_um_peterm_weebiano (
 
   // ---------------- demo jingle ----------------
   wire demo_active = demo_en && !key_active;
-  reg [4:0] dtick, dstep;
+  reg [4:0] dtick;       // frames inside one time unit
+  reg [2:0] dunit;       // units already played inside the current note
+  reg [5:0] dev;         // current note in the table
+  wire [7:0] dent      = DEMO_TUNE[dev * 8 +: 8];
+  wire [2:0] demo_note = dent[2:0];
+  wire       demo_shrp = dent[3];
+  wire       demo_rest = dent[4];
+  wire [2:0] demo_len  = dent[7:5];          // length - 1
   always @(posedge clk) begin
     if (!rst_n || !demo_active) begin
-      dtick <= 0; dstep <= 0;
+      dtick <= 0; dunit <= 0; dev <= 0;
     end else if (vs_edge) begin
       if (dtick == DEMO_FRAMES - 1) begin
         dtick <= 0;
-        dstep <= (dstep == DEMO_STEPS - 1) ? 5'd0 : dstep + 5'd1;
+        if (dunit == demo_len) begin
+          dunit <= 0;
+          dev   <= (dev == DEMO_EVENTS - 1) ? 6'd0 : dev + 6'd1;
+        end else dunit <= dunit + 3'd1;
       end else dtick <= dtick + 5'd1;
     end
   end
 
-  wire [3:0] dent      = DEMO_TUNE[{dstep, 2'b00} +: 4];
-  wire [2:0] demo_note = dent[2:0];
-  wire       demo_rest = dent[3];
-
   wire [2:0] note     = key_active ? key_note : demo_note;
   wire       anim_on  = key_active || (demo_active && !demo_rest);
-  wire       sound_on = key_active || (demo_active && !demo_rest && dtick != 5'd0);
-  wire       sharp    = sharp_in && key_active && note != 3'd2 && note != 3'd6;
+  wire       sound_on = key_active || (demo_active && !demo_rest && !(dtick == 5'd0 && dunit == 3'd0));
+  // Mi and Si have no sharp (no black key after them), so the button is ignored there
+  wire       sharp    = key_active ? (sharp_in && note != 3'd2 && note != 3'd6)
+                                   : (demo_active && !demo_rest && demo_shrp);
 
   // ---------------- animation (2 idle + 2 singing frames) ----------------
   // frame 0 = eyes open, 1 = eyes closed (idle blink), 2 = eyes closed, 3 = mouth open
