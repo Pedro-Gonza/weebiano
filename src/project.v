@@ -10,49 +10,57 @@ module tt_um_peterm_weebiano (
     input  wire       clk,
     input  wire       rst_n
 );
-  // ---------------- test switch ----------------
-  // The playground cannot drive the uio pins, so in test mode they are forced from UIO_FORCE.
-  // Set TEST_UIO = 1'b0 before manufacturing
-  localparam       TEST_UIO  = 1'b0;
-  localparam [7:0] UIO_FORCE = 8'b0000_0000;   // bit n = uio[n] held high (bit 6 = demo on)
-  wire [7:0] uio = TEST_UIO ? UIO_FORCE : uio_in;
-
   // ---------------- demo tune ----------------
   // One entry per note, 8 bits, entry 0 in the lowest bits:
   //   bits 2:0 note (0 Do, 1 Re, 2 Mi, 3 Fa, 4 Sol, 5 La, 6 Si, 7 high Do), bit 3 sharp,
-  //   bit 4 rest, bits 7:5 = length - 1 (in time units).
-  localparam        DEMO_EVENTS = 136;   // entries in the table; 304 time units = 30.4 s per loop
+  //   bit 4 rest, bits 7:5 = length - 1 (in time units).  Make it with make_tune.py.
+  localparam        DEMO_EVENTS = 134;   // entries in the table; 290 time units = 29.0 s per loop
   localparam        DEMO_BITS   = 8;   // bits needed to count the entries
   localparam        DEMO_FRAMES_HW = 6;  // video frames per time unit at 60 fps: 150 BPM, 4 units per beat
-  localparam [1087:0] DEMO_TUNE = 1088'h27202030f0302010042d100f100310001004233064233064706023242324233064233064706023242324233064233064706023242324233064233064f0f070f0636903046d2703102c242323450d10052d27272020450d252d272710001000450d10052d271047276d27030c2c24232310250d252d27272020450d1005100d27272020450d252d27;
-  // The playground runs far below 60 video frames per second and the demo counts video
-  // frames, so in test mode it uses DEMO_FRAMES_SIM instead: 1 at about 12 fps, 2 at about 25 fps.
-  localparam        DEMO_FRAMES_SIM = 2;
-  localparam        DEMO_FRAMES = TEST_UIO ? DEMO_FRAMES_SIM : DEMO_FRAMES_HW;
+  localparam [1071:0] DEMO_TUNE = 1072'h27202030f0302010042d100f100310001004233064233064706023242324233064233064706023242324233064233064706023242324233064233064b0f0636903046d2703102c242323450d10052d27272020450d252d272710001000450d10052d271047276d27030c2c24232310250d252d27272020450d1005100d27272020450d252d27;
+  localparam        DEMO_FRAMES = DEMO_FRAMES_HW;
 
   // ---------------- controls on the bidirectional pins (bits 6:0 are inputs, bit 7 is audio out) ----------------
-  wire       oct_up   = uio[0];
-  wire       oct_dn   = uio[1];
-  wire       sharp_in = uio[2];
-  wire [1:0] timbre   = uio[4:3];   // 0: 50% square, 1: 25%, 2: 12.5%, 3: pluck
-  wire       vib_en   = uio[5];
-  wire       demo_en  = uio[6];     // plays the demo tune while no key is held
+  wire       oct_up   = uio_in[0];
+  wire       oct_dn   = uio_in[1];
+  wire       sharp_in = uio_in[2];
+  wire [1:0] timbre   = uio_in[4:3];   // 0: 50% square, 1: 25%, 2: 12.5%, 3: pluck
+  wire       vib_en   = uio_in[5];
+  wire       demo_en  = uio_in[6];     // plays the demo tune while no key is held
 
-  // ---------------- keys -> note (lowest key wins) ----------------
+  // ---------------- keys -> note (last pressed wins; if it is released, lowest held key) ----------------
   wire key_active = |ui_in;
-  reg [2:0] key_note;
+  reg [7:0] keys_q;
+  reg [2:0] last;
+  reg [2:0] low_note, new_note;
+  wire [7:0] newk = ui_in & ~keys_q;
   always @* begin
     casez (ui_in)
-      8'b???????1: key_note = 3'd0;
-      8'b??????10: key_note = 3'd1;
-      8'b?????100: key_note = 3'd2;
-      8'b????1000: key_note = 3'd3;
-      8'b???10000: key_note = 3'd4;
-      8'b??100000: key_note = 3'd5;
-      8'b?1000000: key_note = 3'd6;
-      default:     key_note = 3'd7;
+      8'b???????1: low_note = 3'd0;
+      8'b??????10: low_note = 3'd1;
+      8'b?????100: low_note = 3'd2;
+      8'b????1000: low_note = 3'd3;
+      8'b???10000: low_note = 3'd4;
+      8'b??100000: low_note = 3'd5;
+      8'b?1000000: low_note = 3'd6;
+      default:     low_note = 3'd7;
+    endcase
+    casez (newk)
+      8'b???????1: new_note = 3'd0;
+      8'b??????10: new_note = 3'd1;
+      8'b?????100: new_note = 3'd2;
+      8'b????1000: new_note = 3'd3;
+      8'b???10000: new_note = 3'd4;
+      8'b??100000: new_note = 3'd5;
+      8'b?1000000: new_note = 3'd6;
+      default:     new_note = 3'd7;
     endcase
   end
+  always @(posedge clk) begin
+    keys_q <= rst_n ? ui_in : 8'd0;
+    if (!rst_n) last <= 3'd0; else if (|newk) last <= new_note;
+  end
+  wire [2:0] key_note = ui_in[last] ? last : low_note;
 
   // ---------------- VGA timing ----------------
   wire hsync, vsync, video_active;
@@ -97,11 +105,16 @@ module tt_um_peterm_weebiano (
   // each demo note starts with a short silence so repeated notes are heard separately:
   // one video frame on the chip; in test mode only the top part of a frame, so that
   // notes lasting a single frame are not swallowed
-  wire       demo_gap = (dtick == 5'd0 && dunit == 3'd0) && (TEST_UIO ? (pix_y[9:7] == 3'd0) : 1'b1);
+  wire       demo_gap = (dtick == 5'd0 && dunit == 3'd0);
   wire       sound_on = key_active || (demo_active && !demo_rest && !demo_gap);
   // Mi and Si have no sharp (no black key after them), so the button is ignored there
   wire       sharp    = key_active ? (sharp_in && note != 3'd2 && note != 3'd6)
                                    : (demo_active && !demo_rest && demo_shrp);
+
+  // Playground preview only: the playground runs at about 20 fps instead of 60, so the frame-counted
+  // animations look 3x too slow.  SPEEDUP = 3 makes the rings and the mouth/eye swap run at real
+  // chip speed there.  >>> Leave it at 1 for the chip. <<<
+  localparam [2:0] SPEEDUP = 3'd1;
 
   // ---------------- animation (2 idle + 2 singing frames) ----------------
   // frame 0 = eyes open, 1 = eyes closed (idle blink), 2 = eyes closed, 3 = mouth open
@@ -115,10 +128,10 @@ module tt_um_peterm_weebiano (
       if (anim_on != anim_q) begin             // start/stop: restart loop
         tick <= 0; phase <= 0;
       end else if (vs_edge) begin
-        if (tick == (anim_on ? 5'd7 : 5'd31)) begin   // sing ~7.5 Hz, idle ~2 Hz
+        if ((SPEEDUP == 3'd1) ? (tick == (anim_on ? 5'd7 : 5'd31)) : (tick + {2'b0, SPEEDUP} > (anim_on ? 5'd7 : 5'd31))) begin   // sing ~7.5 Hz, idle ~2 Hz
           tick  <= 0;
           phase <= ~phase;
-        end else tick <= tick + 5'd1;
+        end else tick <= tick + ((SPEEDUP == 3'd1) ? 5'd1 : {2'b0, SPEEDUP});
       end
     end
   end
@@ -160,7 +173,8 @@ module tt_um_peterm_weebiano (
   // All differ from each other and from the sprite (hair 001010, skin 111110,
   // outline 010101) and avoid white/yellow so the yellow label stays readable.
   reg [5:0] play_a, play_b;
-  always @* case (note)
+  wire [2:0] psel = key_active ? note : cyc[3:1];
+  always @* case (psel)
     3'd0: begin play_a = 6'b010000; play_b = 6'b100000; end   // Do   red
     3'd1: begin play_a = 6'b100100; play_b = 6'b111000; end   // Re   orange
     3'd2: begin play_a = 6'b010100; play_b = 6'b101000; end   // Mi   olive
@@ -180,13 +194,13 @@ module tt_um_peterm_weebiano (
     3'd0: spd = 5'd8;   3'd1: spd = 5'd9;   3'd2: spd = 5'd10;  3'd3: spd = 5'd11;
     3'd4: spd = 5'd12;  3'd5: spd = 5'd13;  3'd6: spd = 5'd15;  default: spd = 5'd16;
   endcase
-  reg [4:0] rph;
-  always @(posedge clk) rph <= !rst_n ? 5'd0 : (vs_edge ? rph + (anim_on ? spd : 5'd8) : rph);
-  wire [1:0] tm = rph[4:3];
+  reg [7:0] rph;
+  always @(posedge clk) rph <= !rst_n ? 7'd0 : (vs_edge ? rph + ((SPEEDUP == 3'd1) ? {2'b0, (key_active ? spd : 5'd8)} : {2'b0, (key_active ? spd : 5'd8)} * SPEEDUP) : rph);
+  wire [1:0] tm = rph[7:6];
 
   // slow clock for idle palette drift (changes every ~2 s)
-  reg [2:0] cyc;
-  always @(posedge clk) cyc <= !rst_n ? 3'd0 : ((vs_edge && bgt == 6'd63) ? cyc + 3'd1 : cyc);
+  reg [3:0] cyc;
+  always @(posedge clk) cyc <= !rst_n ? 4'd0 : ((vs_edge && bgt == 6'd63) ? cyc + 4'd1 : cyc);
 
   // rings centred behind the head (cell boundary x=20, y=18)
   wire [5:0] dx6 = (cx >= 6'd20) ? (cx - 6'd20) : (6'd19 - cx);
@@ -236,25 +250,14 @@ module tt_um_peterm_weebiano (
 
   // rings are 2 cells wide, so only the low 2 bits of the distance matter
   // singing: rings expand outward; idle: rings contract inward
-  wire [1:0] ph   = anim_on ? (rex[1:0] - tm) : (rex[1:0] + tm);
+  wire [1:0] ph   = (key_active || demo_active) ? (rex[1:0] - tm) : (rex[1:0] + tm);
   wire       ring = ph[1];
-
-  // idle palettes {dark band, light band}
-  wire [1:0] hue = cyc[2:1];                   // drifts through 4 palettes
-  reg [5:0] idle_a, idle_b;
-  always @* case (hue)
-    2'd0: begin idle_a = 6'b000001; idle_b = 6'b000010; end   // navy / blue
-    2'd1: begin idle_a = 6'b000100; idle_b = 6'b001000; end   // green
-    2'd2: begin idle_a = 6'b010001; idle_b = 6'b100010; end   // purple
-    default: begin idle_a = 6'b000101; idle_b = 6'b001001; end // teal
-  endcase
 
   // plain dark box behind the label / sharp sign so they are always legible
   wire in_box = anim_on && cx < (sharp ? 6'd16 : 6'd10) && cy < 6'd6;
 
   wire [5:0] bg_play = ring ? play_b : play_a;
-  wire [5:0] bg_idle = ring ? idle_b : idle_a;
-  wire [5:0] bg      = in_box ? 6'b000000 : (anim_on ? bg_play : bg_idle);
+  wire [5:0] bg      = in_box ? 6'b000000 : bg_play;
 
   reg [5:0] pal;
   always @* case (idx)
@@ -328,5 +331,5 @@ module tt_um_peterm_weebiano (
   assign uio_out = {sound_on & wave, 7'b0};
   assign uio_oe  = 8'h80;
 
-  wire _unused = &{ena, uio_in, uio[7], pix_x[3:0], pix_y[3:0], dx6[5], dy6[5], rex[4:2], ph[0], cyc[0], half_v[1:0], 1'b0};
+  wire _unused = &{ena, uio_in[7], pix_x[3:0], pix_y[3:0], dx6[5], dy6[5], rex[4:2], ph[0], cyc[0], half_v[1:0], 1'b0};
 endmodule
