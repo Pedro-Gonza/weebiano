@@ -13,12 +13,11 @@ module tt_um_peterm_weebiano (
   // ---------------- demo tune ----------------
   // One entry per note, 8 bits, entry 0 in the lowest bits:
   //   bits 2:0 note (0 Do, 1 Re, 2 Mi, 3 Fa, 4 Sol, 5 La, 6 Si, 7 high Do), bit 3 sharp,
-  //   bit 4 rest, bits 7:5 = length - 1 (in time units).  Make it with make_tune.py.
-  localparam        DEMO_EVENTS = 134;   // entries in the table; 290 time units = 29.0 s per loop
+  //   bit 4 rest, bits 7:5 = length - 1 (in time units).
+  localparam        DEMO_EVENTS = 134; // entries in the table; 290 time units = 29.0 s per loop
   localparam        DEMO_BITS   = 8;   // bits needed to count the entries
-  localparam        DEMO_FRAMES_HW = 6;  // video frames per time unit at 60 fps: 150 BPM, 4 units per beat
+  localparam        DEMO_FRAMES = 6;   // video frames per time unit: 60 fps / 6 = 10 units/s = 150 BPM with 4 units per beat
   localparam [1071:0] DEMO_TUNE = 1072'h27202030f0302010042d100f100310001004233064233064706023242324233064233064706023242324233064233064706023242324233064233064b0f0636903046d2703102c242323450d10052d27272020450d252d272710001000450d10052d271047276d27030c2c24232310250d252d27272020450d1005100d27272020450d252d27;
-  localparam        DEMO_FRAMES = DEMO_FRAMES_HW;
 
   // ---------------- controls on the bidirectional pins (bits 6:0 are inputs, bit 7 is audio out) ----------------
   wire       oct_up   = uio_in[0];
@@ -102,22 +101,15 @@ module tt_um_peterm_weebiano (
 
   wire [2:0] note     = key_active ? key_note : demo_note;
   wire       anim_on  = key_active || (demo_active && !demo_rest);
-  // each demo note starts with a short silence so repeated notes are heard separately:
-  // one video frame on the chip; in test mode only the top part of a frame, so that
-  // notes lasting a single frame are not swallowed
+  // each demo note starts with one frame of silence so repeated notes are heard separately
   wire       demo_gap = (dtick == 5'd0 && dunit == 3'd0);
   wire       sound_on = key_active || (demo_active && !demo_rest && !demo_gap);
-  // Mi and Si have no sharp (no black key after them), so the button is ignored there
+  // Mi and Si have no sharp (#), so the button is ignored there
   wire       sharp    = key_active ? (sharp_in && note != 3'd2 && note != 3'd6)
                                    : (demo_active && !demo_rest && demo_shrp);
 
-  // Playground preview only: the playground runs at about 20 fps instead of 60, so the frame-counted
-  // animations look 3x too slow.  SPEEDUP = 3 makes the rings and the mouth/eye swap run at real
-  // chip speed there.  >>> Leave it at 1 for the chip. <<<
-  localparam [2:0] SPEEDUP = 3'd1;
-
   // ---------------- animation (2 idle + 2 singing frames) ----------------
-  // frame 0 = eyes open, 1 = eyes closed (idle blink), 2 = eyes closed, 3 = mouth open
+  // frame 0 = eyes open, 1 = 2 = eyes closed, 3 = mouth open
   reg       anim_q, phase;
   reg [4:0] tick;
   always @(posedge clk) begin
@@ -128,10 +120,10 @@ module tt_um_peterm_weebiano (
       if (anim_on != anim_q) begin             // start/stop: restart loop
         tick <= 0; phase <= 0;
       end else if (vs_edge) begin
-        if ((SPEEDUP == 3'd1) ? (tick == (anim_on ? 5'd7 : 5'd31)) : (tick + {2'b0, SPEEDUP} > (anim_on ? 5'd7 : 5'd31))) begin   // sing ~7.5 Hz, idle ~2 Hz
+        if (tick == (anim_on ? 5'd7 : 5'd31)) begin   // sing ~7.5 Hz, idle ~2 Hz
           tick  <= 0;
           phase <= ~phase;
-        end else tick <= tick + ((SPEEDUP == 3'd1) ? 5'd1 : {2'b0, SPEEDUP});
+        end else tick <= tick + 5'd1;
       end
     end
   end
@@ -163,15 +155,22 @@ module tt_um_peterm_weebiano (
   wire in_sh  = video_active && sharp && cx >= 6'd10 && cx < 6'd15 && cy < 6'd5;
   wire sh_pix = cx[0] | cy[0];
 
-  // octave indicator, top-right (cells x 36..38, y 1..3): "-" = down, "+" = up, hidden if normal
+  // octave indicator, top-right (cells x 36..38, y 1..3): "-" for octave down, "+" for octave up, hidden if normal
   wire in_oct  = video_active && (oct_up ^ oct_dn) && cx >= 6'd36 && cx < 6'd39 &&
                  cy >= 6'd1 && cy < 6'd4;
   wire oct_pix = (cy == 6'd2) || (oct_up && cx == 6'd37);
 
+  // ---------------- frame counters ----------------
+  reg [5:0] bgt;                               // frame counter: vibrato LFO, slow clocks
+  always @(posedge clk) bgt <= !rst_n ? 6'd0 : (vs_edge ? bgt + 6'd1 : bgt);
+
+  // slow clock for idle palette drift (cyc[3:1] changes every ~2 s)
+  reg [3:0] cyc;
+  always @(posedge clk) cyc <= !rst_n ? 4'd0 : ((vs_edge && bgt == 6'd63) ? cyc + 4'd1 : cyc);
+
   // ---------------- colors {R,G,B}, 2 bits each ----------------
-  // ring colours per note: {dark band, light band}, same idea as the idle palettes.
-  // All differ from each other and from the sprite (hair 001010, skin 111110,
-  // outline 010101) and avoid white/yellow so the yellow label stays readable.
+  // ring colours {dark band, light band}: per note while a key is held, otherwise all 8 cycled slowly.
+  // All differ from each other and from the sprite (hair 001010, skin 111110, outline 010101) and avoid white/yellow so the yellow label stays readable.
   reg [5:0] play_a, play_b;
   wire [2:0] psel = key_active ? note : cyc[3:1];
   always @* case (psel)
@@ -185,9 +184,6 @@ module tt_um_peterm_weebiano (
     default: begin play_a = 6'b010110; play_b = 6'b101011; end // Do'  periwinkle
   endcase
 
-  reg [5:0] bgt;                               // frame counter: vibrato LFO, slow clocks
-  always @(posedge clk) bgt <= !rst_n ? 6'd0 : (vs_edge ? bgt + 6'd1 : bgt);
-
   // ring phase accumulator: speed follows the note's pitch (C=8 ... C'=16, ratio 1:2)
   reg [4:0] spd;
   always @* case (note)
@@ -195,12 +191,8 @@ module tt_um_peterm_weebiano (
     3'd4: spd = 5'd12;  3'd5: spd = 5'd13;  3'd6: spd = 5'd15;  default: spd = 5'd16;
   endcase
   reg [7:0] rph;
-  always @(posedge clk) rph <= !rst_n ? 7'd0 : (vs_edge ? rph + ((SPEEDUP == 3'd1) ? {2'b0, (key_active ? spd : 5'd8)} : {2'b0, (key_active ? spd : 5'd8)} * SPEEDUP) : rph);
-  wire [1:0] tm = rph[7:6];
-
-  // slow clock for idle palette drift (changes every ~2 s)
-  reg [3:0] cyc;
-  always @(posedge clk) cyc <= !rst_n ? 4'd0 : ((vs_edge && bgt == 6'd63) ? cyc + 4'd1 : cyc);
+  always @(posedge clk) rph <= !rst_n ? 8'd0 : (vs_edge ? rph + {3'b0, (key_active ? spd : 5'd8)} : rph);
+  wire [1:0] tm = rph[7:6];                 // ring step every 8 frames idle (7.5/s), every 4 at the highest note
 
   // rings centred behind the head (cell boundary x=20, y=18)
   wire [5:0] dx6 = (cx >= 6'd20) ? (cx - 6'd20) : (6'd19 - cx);
@@ -249,7 +241,7 @@ module tt_um_peterm_weebiano (
   wire [4:0] rex  = isqrt(qsum);
 
   // rings are 2 cells wide, so only the low 2 bits of the distance matter
-  // singing: rings expand outward; idle: rings contract inward
+  // key held or demo playing: rings expand outward; idle: rings contract inward
   wire [1:0] ph   = (key_active || demo_active) ? (rex[1:0] - tm) : (rex[1:0] + tm);
   wire       ring = ph[1];
 

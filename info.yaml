@@ -30,7 +30,7 @@ pinout:
   ui[4]: "Sol"
   ui[5]: "La"
   ui[6]: "Si"
-  ui[7]: "Do"
+  ui[7]: "Do (high)"
 
   # Outputs
   uo[0]: "R1"

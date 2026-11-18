@@ -22,6 +22,10 @@ module tb ();
   wire [7:0] uo_out;
   wire [7:0] uio_out;
   wire [7:0] uio_oe;
+  // single-bit views of the interesting outputs, for the cocotb edge triggers
+  wire hsync = uo_out[7];
+  wire vsync = uo_out[3];
+  wire audio = uio_out[7];
 `ifdef GL_TEST
   wire VPWR = 1'b1;
   wire VGND = 1'b0;
