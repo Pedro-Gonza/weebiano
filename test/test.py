@@ -9,7 +9,7 @@
 import itertools
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge
+from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer
 from cocotb.utils import get_sim_time
 
 CLK_PS   = 39722                 # 25.175 MHz
@@ -46,12 +46,23 @@ async def reset(dut, ui=0, uio=0):
     await ClockCycles(dut.clk, 2)
 
 
+async def clean_rising(dut):
+    """Next rising edge of the audio pin that stays high for at least 50 ns.
+    A real square-wave edge always does; the 1-2 ns glitches that the gate-level netlist (unit
+    gate delays) shows when several slot bits change at once do not, and are harmless on the buzzer."""
+    while True:
+        await RisingEdge(dut.audio)
+        await Timer(50, unit="ns")
+        if int(dut.audio.value) == 1:
+            return
+
+
 async def measure_hz(dut, periods=4):
     """Frequency of the audio pin, from `periods` full periods (rising edge to rising edge)."""
-    await RisingEdge(dut.audio)
+    await clean_rising(dut)
     t0 = get_sim_time("ps")
     for _ in range(periods):
-        await RisingEdge(dut.audio)
+        await clean_rising(dut)
     return periods * 1e12 / (get_sim_time("ps") - t0)
 
 
@@ -104,7 +115,7 @@ async def test_notes(dut):
         dut._log.info("%-4s %7.2f Hz (expected %7.2f)", NAMES[i], hz, ref)
         assert close(hz, ref), f"{NAMES[i]}: {hz:.2f} Hz, expected {ref} Hz"
 
-    # sharp pin: semitone up; ignored on Mi and Si (no black key there)
+    # sharp pin: semitone up; ignored on Mi and Si
     dut.uio_in.value = SHARP
     for i in range(7):
         dut.ui_in.value = 1 << i
